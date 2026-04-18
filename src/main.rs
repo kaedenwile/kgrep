@@ -1,3 +1,8 @@
+mod cli;
+mod regex;
+
 fn main() {
-    println!("Hello, world!");
+    println!("Welcome to Kaeden's regex!");
+
+    cli::cli();
 }
