@@ -18,10 +18,13 @@ pub fn cli() {
         usage(0);
     }
 
-    let regex = RegExp::parse(parsed_args.regex.as_str());
+    let Ok(regex) = RegExp::parse(parsed_args.regex.as_str()) else {
+        println!("Error: could not parse regular expression.");
+        exit(1);
+    };
 
     // TODO: actually read search_path
-    let _ = regex.apply(parsed_args.search_path.as_str());
+    let _ = regex.execute(parsed_args.search_path.as_str());
 }
 
 #[derive(PartialEq, Debug)]
