@@ -12,7 +12,7 @@ pub enum Atom {
         invert_match: bool,
         chars: Vec<Proton>,
     }, // [a-z]
-    Group(Vec<Atom>), // (...)
+    Group(usize, Vec<Atom>), // (...)
     Or(Vec<Atom>, Vec<Atom>), // a|b
     Count(Box<Atom>, usize, usize), // a*, b+, c?, d{1,2}
 }
@@ -23,12 +23,18 @@ pub enum Proton {
     Range(char, char),
 }
 
+struct AtomParseResult {
+    atoms: Vec<Atom>,
+    taken: usize,
+    groups: usize,
+}
+
 impl RegExp {
     // Parses a usable RegExp object from a raw string
     pub fn parse(expression: &str) -> Result<RegExp, String> {
-        let (len, atoms) = Atom::parse(expression)?;
+        let AtomParseResult { taken, atoms, .. } = Atom::parse(expression, 0)?;
 
-        if len != expression.len() {
+        if taken != expression.len() {
             return Err("Unexpected closing paren".to_string());
         }
 
@@ -37,9 +43,12 @@ impl RegExp {
 }
 
 impl Atom {
-    fn parse(expression: &str) -> Result<(usize, Vec<Atom>), String> {
+    /// Need a unique index for each group, so pass in starting_group_index
+    /// to safely handle recursion.
+    fn parse(expression: &str, starting_group_index: usize) -> Result<AtomParseResult, String> {
         let mut atoms = vec![];
         let mut char_indices = expression.char_indices();
+        let mut group_index = starting_group_index;
 
         while let Some((i, c)) = char_indices.next() {
             let atom = match c {
@@ -52,15 +61,42 @@ impl Atom {
                     atom
                 }
                 '(' => {
-                    let (taken, atoms) = Atom::parse(&expression[i + 1..])?;
+                    let my_group_index = group_index;
+
+                    let AtomParseResult {
+                        atoms,
+                        taken,
+                        groups,
+                    } = Atom::parse(&expression[i + 1..], group_index + 1)?;
+
+                    group_index += groups + 1;
+
                     // Take closing paren
                     let Some((_, ')')) = char_indices.nth(taken) else {
                         return Err("Missing expected closing paren".to_string());
                     };
-                    Atom::Group(atoms)
+
+                    Atom::Group(my_group_index, atoms)
                 }
                 ')' => {
-                    return Ok((i, atoms));
+                    return Ok(AtomParseResult {
+                        atoms,
+                        taken: i,
+                        groups: group_index - starting_group_index,
+                    });
+                }
+                '|' => {
+                    let AtomParseResult {
+                        atoms: right_atoms,
+                        taken,
+                        groups,
+                    } = Atom::parse(&expression[i + 1..], group_index)?;
+
+                    return Ok(AtomParseResult {
+                        atoms: vec![Atom::Or(atoms, right_atoms)],
+                        taken: i + 1 + taken,
+                        groups,
+                    });
                 }
 
                 // Counts
@@ -69,6 +105,12 @@ impl Atom {
                         return Err("Unexpected * at start of group".to_string());
                     };
                     Atom::Count(Box::new(prev), 0, usize::MAX)
+                }
+                '+' => {
+                    let Some(prev) = atoms.pop() else {
+                        return Err("Unexpected * at start of group".to_string());
+                    };
+                    Atom::Count(Box::new(prev), 1, usize::MAX)
                 }
                 '?' => {
                     let Some(prev) = atoms.pop() else {
@@ -83,7 +125,11 @@ impl Atom {
             atoms.push(atom);
         }
 
-        Ok((expression.len(), atoms))
+        Ok(AtomParseResult {
+            atoms,
+            taken: expression.len(),
+            groups: group_index - starting_group_index,
+        })
     }
 
     fn parse_chars(expression: &str) -> Result<(usize, Atom), String> {
@@ -152,21 +198,24 @@ mod tests {
         let input = fs::read_to_string("OpenJDK_Regex_TestCases.txt").unwrap();
         let lines: Vec<&str> = input.lines().filter(|l| !l.starts_with("//")).collect();
 
-        for test_case in lines.chunks(4) {
+        for (i, test_case) in lines.chunks(4).enumerate() {
             let needle = test_case[0];
             let haystack = test_case[1];
             let expected = parse_expected(test_case[2]);
 
             let regex = RegExp::parse(needle).unwrap();
+
+            println!("REGEX: {:?}", regex);
+
             let result = regex.execute(haystack);
 
             assert_eq!(
                 result, expected,
-                "Needle: {}\nHaystack: {}\nResult: {:?}",
-                needle, haystack, result
+                "\nNeedle: {}\nHaystack: {}",
+                needle, haystack
             );
 
-            println!("PASSED!");
+            println!("PASSED #{}! \n\t- {:?}\n\t- {:?}", i, result, expected);
         }
     }
 
@@ -175,14 +224,31 @@ mod tests {
             return None;
         }
 
-        let regex = RegExp::parse("true (.*) [4-0]( .*)*").unwrap();
+        // TODO: fix char ranges and revert this
+        let regex = RegExp::parse("true (.*) [0-4]( [^ ]*)?( [^ ]*)?( [^ ]*)?( [^ ]*)?").unwrap();
+
         let Some(parsed) = regex.execute(expectation) else {
             panic!("Could not parse test case {}", expectation);
         };
 
+        println!("PARSED: {:?}", parsed);
+
         Some(Match {
-            substring: parsed.captures[0].clone(),
-            captures: parsed.captures[1..].to_vec(),
+            substring: parsed.captures[0].clone().unwrap(),
+            captures: parsed.captures[1..]
+                .iter()
+                .map(|c| {
+                    if let Some(val) = c
+                        && val == ""
+                    {
+                        None
+                    } else if let Some(val) = c {
+                        Some(val[1..].to_string())
+                    } else {
+                        None
+                    }
+                })
+                .collect(),
         })
     }
 }

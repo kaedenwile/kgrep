@@ -3,45 +3,48 @@ use crate::regex::{Atom, Proton, RegExp};
 #[derive(Debug, PartialEq)]
 pub struct Match {
     pub substring: String,
-    pub captures: Vec<String>,
+    pub captures: Vec<Option<String>>,
 }
 
+#[derive(Debug, Clone)]
 struct MatchNode {
     text: String,
     tail: Option<Box<MatchNode>>,
-    capture: Option<String>,
+    captures: Vec<(usize, String)>,
 }
 
 impl RegExp {
     pub fn execute(self: &RegExp, haystack: &str) -> Option<Match> {
-        // println!("REGEX MATCHING HAYSTACK={haystack}");
+        for i in 0..haystack.len() {
+            if let Some(tail) = Atom::match_atoms(&self.atoms, &haystack, i) {
+                let mut substring = String::new();
+                let mut captures = vec![];
 
-        if let Some(tail) = Atom::match_atoms(&self.atoms, haystack, 0) {
-            let mut substring = tail.text.clone();
-            let mut captures = vec![];
+                let mut current = Some(Box::new(tail));
+                while let Some(next) = current.take() {
+                    // println!("NODE: {:?}", next.text);
 
-            if let Some(capture) = &tail.capture {
-                captures.push(capture.clone());
-            }
+                    substring.push_str(&next.text);
 
-            let mut current = tail;
-            while let Some(next) = current.tail {
-                substring.push_str(&next.text);
+                    for (cap_idx, cap_val) in next.captures {
+                        println!("FOUND CAPTURE: {} {}", cap_idx, cap_val);
+                        while cap_idx >= captures.len() {
+                            captures.push(None)
+                        }
+                        captures[cap_idx] = Some(cap_val);
+                    }
 
-                if let Some(capture) = &next.capture {
-                    captures.push(capture.clone());
+                    current = next.tail;
                 }
 
-                current = *next;
+                return Some(Match {
+                    substring,
+                    captures,
+                });
             }
-
-            Some(Match {
-                substring,
-                captures,
-            })
-        } else {
-            None
         }
+
+        None
     }
 }
 
@@ -63,7 +66,7 @@ impl Atom {
                     Some(MatchNode {
                         text: "".to_string(),
                         tail: Some(Box::new(tail)),
-                        capture: None,
+                        captures: vec![],
                     })
                 } else {
                     None
@@ -76,7 +79,7 @@ impl Atom {
                     Some(MatchNode {
                         text: "".to_string(),
                         tail: Some(Box::new(tail)),
-                        capture: None,
+                        captures: vec![],
                     })
                 } else {
                     None
@@ -89,7 +92,7 @@ impl Atom {
                     Some(MatchNode {
                         text: c.to_string(),
                         tail: Some(Box::new(tail)),
-                        capture: None,
+                        captures: vec![],
                     })
                 } else {
                     None
@@ -108,7 +111,7 @@ impl Atom {
                                 matches = true;
                                 break;
                             }
-                            Proton::Range(a, b) if a > next && next > b => {
+                            Proton::Range(a, b) if a <= next && next <= b => {
                                 matches = true;
                                 break;
                             }
@@ -124,7 +127,7 @@ impl Atom {
                         Some(MatchNode {
                             text: next.to_string(),
                             tail: Some(Box::new(tail)),
-                            capture: None,
+                            captures: vec![],
                         })
                     } else {
                         None
@@ -133,22 +136,26 @@ impl Atom {
                     None
                 }
             }
-            Group(group_atoms) => {
+            Group(group_index, group_atoms) => {
                 let all_atoms = [&group_atoms, &atoms[1..]].concat();
 
                 if let Some(tail) = Atom::match_atoms(&all_atoms, haystack, cursor) {
                     let mut capture_text = String::new();
+                    let mut captures = vec![(0, String::new())];
 
-                    let mut current = &tail;
+                    let mut current = tail;
                     for _ in 0..group_atoms.len() {
                         capture_text.push_str(&current.text);
-                        current = current.tail.as_ref().unwrap().as_ref();
+                        captures.extend(current.captures);
+                        current = *current.tail.unwrap();
                     }
 
+                    captures[0] = (*group_index, capture_text.clone());
+
                     Some(MatchNode {
-                        text: capture_text.clone(),
-                        tail: Some(Box::new(tail)),
-                        capture: Some(capture_text),
+                        text: capture_text,
+                        tail: Some(Box::new(current)),
+                        captures,
                     })
                 } else {
                     None
@@ -160,31 +167,35 @@ impl Atom {
 
                 if let Some(tail) = Atom::match_atoms(&all_left_atoms, haystack, cursor) {
                     let mut capture_text = String::new();
+                    let mut captures = vec![];
 
-                    let mut current = &tail;
+                    let mut current = tail;
                     for _ in 0..all_left_atoms.len() {
                         capture_text.push_str(&current.text);
-                        current = current.tail.as_ref().unwrap().as_ref();
+                        captures.extend(current.captures);
+                        current = *current.tail.unwrap();
                     }
 
                     Some(MatchNode {
                         text: capture_text,
-                        tail: Some(Box::new(tail)),
-                        capture: None,
+                        tail: Some(Box::new(current)),
+                        captures,
                     })
                 } else if let Some(tail) = Atom::match_atoms(&all_right_atoms, haystack, cursor) {
                     let mut capture_text = String::new();
+                    let mut captures = vec![];
 
-                    let mut current = &tail;
+                    let mut current = tail;
                     for _ in 0..all_left_atoms.len() {
                         capture_text.push_str(&current.text);
-                        current = current.tail.as_ref().unwrap().as_ref();
+                        captures.extend(current.captures);
+                        current = *current.tail.unwrap();
                     }
 
                     Some(MatchNode {
                         text: capture_text,
-                        tail: Some(Box::new(tail)),
-                        capture: None,
+                        tail: Some(Box::new(current)),
+                        captures,
                     })
                 } else {
                     None
@@ -194,30 +205,30 @@ impl Atom {
                 let atom = boxed.as_ref();
                 let mut count_atoms = vec![atom.clone(); *min];
 
-                while count_atoms.len() <= *max
+                while count_atoms.len() < *max
                     && let Some(_) = Atom::match_atoms(&count_atoms, haystack, cursor)
                 {
                     count_atoms.push(atom.clone());
                 }
-
-                // println!("Found: {}", count_atoms.len());
 
                 while count_atoms.len() >= *min {
                     let all_count_atoms = [&count_atoms, &atoms[1..]].concat();
 
                     if let Some(tail) = Atom::match_atoms(&all_count_atoms, haystack, cursor) {
                         let mut capture_text = String::new();
+                        let mut captures = vec![];
 
-                        let mut current = &tail;
+                        let mut current = tail;
                         for _ in 0..count_atoms.len() {
                             capture_text.push_str(&current.text);
-                            current = current.tail.as_ref().unwrap().as_ref();
+                            captures.extend(current.captures);
+                            current = *current.tail.unwrap();
                         }
 
                         return Some(MatchNode {
                             text: capture_text,
-                            tail: Some(Box::new(tail)),
-                            capture: None,
+                            tail: Some(Box::new(current)),
+                            captures,
                         });
                     } else if !count_atoms.is_empty() {
                         count_atoms.pop();
@@ -238,39 +249,7 @@ impl MatchNode {
         MatchNode {
             text: "".to_string(),
             tail: None,
-            capture: None,
+            captures: vec![],
         }
     }
-
-    // fn test(condition: bool) -> Option<MatchNode> {
-    //     if condition {
-    //         Some(MatchNode::simple("".to_string()))
-    //     } else {
-    //         None
-    //     }
-    // }
-    //
-    // fn simple(text: String) -> MatchNode {
-    //     MatchNode {
-    //         // has_less_greedy_match: false,
-    //         text,
-    //         captures: vec![],
-    //         subframes: vec![],
-    //     }
-    // }
-    //
-    // fn group(match_nodes: Vec<MatchNode>, is_capture_group: bool) -> MatchNode {
-    //     let mut text = String::new();
-    //
-    //     for node in &match_nodes {
-    //         text.push_str(node.text.as_str());
-    //     }
-    //
-    //     MatchNode {
-    //         text,
-    //         is_capture_group,
-    //         alternate: Alternate::None,
-    //         sub: Some(match_nodes),
-    //     }
-    // }
 }
